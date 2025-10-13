@@ -13,7 +13,6 @@ class TestUser(Model):
     data = JSONField(null=True, default=dict)
 
 
-
 class TestModels(unittest.IsolatedAsyncioTestCase):
     """Test cases for Model functionality with actual database operations."""
     
@@ -57,7 +56,6 @@ class TestModels(unittest.IsolatedAsyncioTestCase):
         """Clean up after each test."""
         # Clean up test data
         try:
-            await TestUser
             await TestUser.objects.all().delete()
         except Exception:
             pass
