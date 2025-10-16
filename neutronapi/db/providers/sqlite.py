@@ -69,7 +69,8 @@ class SQLiteProvider(BaseProvider):
     async def execute(self, query: str, params: Tuple = ()) -> Any:
         await self._ensure_connected()
         sqlite_query = self._convert_postgres_params(query)
-        cursor = await self.conn.execute(sqlite_query, params)
+        processed_params = self._preprocess_params(params)
+        cursor = await self.conn.execute(sqlite_query, processed_params)
         await self.conn.commit()
         return cursor
 
@@ -80,14 +81,16 @@ class SQLiteProvider(BaseProvider):
     async def fetchone(self, query: str, params: Tuple = ()) -> Optional[Dict[str, Any]]:
         await self._ensure_connected()
         sqlite_query = self._convert_postgres_params(query)
-        cursor = await self.conn.execute(sqlite_query, params)
+        processed_params = self._preprocess_params(params)
+        cursor = await self.conn.execute(sqlite_query, processed_params)
         row = await cursor.fetchone()
         return dict(row) if row else None
 
     async def fetchall(self, query: str, params: Tuple = ()) -> List[Dict[str, Any]]:
         await self._ensure_connected()
         sqlite_query = self._convert_postgres_params(query)
-        cursor = await self.conn.execute(sqlite_query, params)
+        processed_params = self._preprocess_params(params)
+        cursor = await self.conn.execute(sqlite_query, processed_params)
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
@@ -106,11 +109,38 @@ class SQLiteProvider(BaseProvider):
 
     def convert_query_param(self, value: Any, field) -> Any:
         """Convert query parameter values for SQLite-specific requirements."""
+        from decimal import Decimal
+
         # For DateTimeField, convert datetime objects to ISO strings for TEXT storage
         if hasattr(field, '__class__') and 'DateTimeField' in field.__class__.__name__:
             if isinstance(value, datetime.datetime):
                 return value.isoformat()
+
+        # For DecimalField, convert Decimal to string for TEXT storage comparison
+        if hasattr(field, '__class__') and 'DecimalField' in field.__class__.__name__:
+            if isinstance(value, Decimal):
+                return str(value)
+
         return value
+
+    def _preprocess_params(self, params: Tuple) -> Tuple:
+        """Preprocess query parameters to handle types not supported by SQLite.
+
+        SQLite doesn't support Python's Decimal type, so we convert Decimals to strings.
+        """
+        from decimal import Decimal
+
+        if not params:
+            return params
+
+        processed = []
+        for param in params:
+            if isinstance(param, Decimal):
+                processed.append(str(param))
+            else:
+                processed.append(param)
+
+        return tuple(processed)
 
     # Schema operations (merged)
     def _process_default_value(self, default: Any) -> str:
@@ -164,6 +194,7 @@ class SQLiteProvider(BaseProvider):
             EnumField,
             FloatField,
             BinaryField,
+            DecimalField,
         )
         mapping = {
             CharField: "TEXT",
@@ -176,6 +207,7 @@ class SQLiteProvider(BaseProvider):
             BinaryField: "BLOB",
             EnumField: "TEXT",
             FloatField: "REAL",
+            DecimalField: "TEXT",
         }
         return mapping.get(type(field), "TEXT")
 

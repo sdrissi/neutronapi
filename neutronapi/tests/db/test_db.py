@@ -9,13 +9,14 @@ from datetime import datetime
 
 from neutronapi.db import setup_databases, get_databases
 from neutronapi.db.models import Model
-from neutronapi.db.fields import CharField, IntegerField, DateTimeField, JSONField, BooleanField
+from neutronapi.db.fields import CharField, IntegerField, DateTimeField, JSONField, BooleanField, DecimalField
 from neutronapi.db.migrations import MigrationManager, CreateModel
 
 class SampleModel(Model):
     """Test model for database operations."""
     name = CharField(max_length=100)
     age = IntegerField(null=True)
+    size = DecimalField(max_digits=10, decimal_places=2, null=True)
     created_at = DateTimeField(default=datetime.now)
     metadata = JSONField(default=dict)
     is_active = BooleanField(default=True)
@@ -83,17 +84,19 @@ class TestModelFunctionality(unittest.TestCase):
     def test_model_fields_discovery(self):
         """Test that model fields are properly discovered."""
         fields = SampleModel._neutronapi_fields_
-        
+
         self.assertIn('id', fields)
         self.assertIn('name', fields)
         self.assertIn('age', fields)
+        self.assertIn('size', fields)
         self.assertIn('created_at', fields)
         self.assertIn('metadata', fields)
         self.assertIn('is_active', fields)
-        
+
         # Test field types
         self.assertIsInstance(fields['name'], CharField)
         self.assertIsInstance(fields['age'], IntegerField)
+        self.assertIsInstance(fields['size'], DecimalField)
         self.assertIsInstance(fields['created_at'], DateTimeField)
         self.assertIsInstance(fields['metadata'], JSONField)
         self.assertIsInstance(fields['is_active'], BooleanField)
@@ -176,15 +179,53 @@ class TestFields(unittest.TestCase):
         """Test DateTimeField handling."""
         field = DateTimeField()
         now = datetime.now()
-        
+
         # Test to_db
         db_value = field.to_db(now)
         assert isinstance(db_value, datetime)
-        
+
         # Test from_db
         python_value = field.from_db(db_value)
         assert isinstance(python_value, datetime)
         assert python_value == now
+
+    def test_decimal_field_precision(self):
+        """Test DecimalField precision handling."""
+        from decimal import Decimal
+
+        field = DecimalField(max_digits=10, decimal_places=2)
+
+        # Test validation with various inputs
+        field.validate(Decimal("123.45"))
+        field.validate(123.45)
+        field.validate("123.45")
+
+        # Test to_db conversion returns string for SQLite compatibility
+        db_value = field.to_db(Decimal("123.45"))
+        assert isinstance(db_value, str), "to_db should return string for SQLite TEXT storage"
+        assert db_value == "123.45"
+
+        # Verify precision is preserved in string format
+        db_value_precise = field.to_db(Decimal("123.456789"))
+        assert db_value_precise == "123.456789"
+
+        # Test from_db conversion parses string back to Decimal
+        python_value = field.from_db("123.45")
+        assert isinstance(python_value, Decimal)
+        assert python_value == Decimal("123.45")
+
+        # Test comparison operators
+        field1 = DecimalField()
+        field1.value = Decimal("100.50")
+        field2 = DecimalField()
+        field2.value = Decimal("100.50")
+        assert field1 == field2
+
+        # Test inequality
+        field3 = DecimalField()
+        field3.value = Decimal("99.99")
+        assert field1 > field3
+        assert field3 < field1
 
 
 class TestMigrations(unittest.TestCase):

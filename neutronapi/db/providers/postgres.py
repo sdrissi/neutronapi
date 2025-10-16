@@ -161,7 +161,15 @@ class PostgreSQLProvider(BaseProvider):
             EnumField,
             FloatField,
             BinaryField,
+            DecimalField,
         )
+
+        # Handle DecimalField with precision/scale
+        if isinstance(field, DecimalField):
+            if field.max_digits is not None and field.decimal_places is not None:
+                return f"NUMERIC({field.max_digits}, {field.decimal_places})"
+            return "NUMERIC"
+
         mapping = {
             CharField: "TEXT",
             TextField: "TEXT",

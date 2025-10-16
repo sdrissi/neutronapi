@@ -1,5 +1,6 @@
 import datetime
 import json
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Optional, Any, Union
 try:
@@ -721,6 +722,145 @@ class FloatField(BaseField):
         if value is None:
             return None
         return float(value)
+
+
+class DecimalField(BaseField):
+    def __init__(
+        self,
+        max_digits=None,
+        decimal_places=None,
+        db_column=None,
+        null=False,
+        default=None,
+        unique=False,
+        blank=False,
+        primary_key=False,
+    ):
+        super().__init__(
+            db_column=db_column,
+            null=null,
+            default=default,
+            unique=unique,
+            blank=blank,
+            primary_key=primary_key,
+        )
+        self.max_digits = max_digits
+        self.decimal_places = decimal_places
+
+    def __eq__(self, other):
+        if isinstance(other, (DecimalField, Decimal, int, float)):
+            if isinstance(other, DecimalField):
+                return self.value == other.value
+            return self.value == other
+        return False
+
+    def __ne__(self, other):
+        if isinstance(other, (DecimalField, Decimal, int, float)):
+            if isinstance(other, DecimalField):
+                return self.value != other.value
+            return self.value != other
+        return True
+
+    def __lt__(self, other):
+        if isinstance(other, (DecimalField, Decimal, int, float)):
+            if isinstance(other, DecimalField):
+                return self.value < other.value
+            return self.value < other
+        return False
+
+    def __le__(self, other):
+        if isinstance(other, (DecimalField, Decimal, int, float)):
+            if isinstance(other, DecimalField):
+                return self.value <= other.value
+            return self.value <= other
+        return False
+
+    def __gt__(self, other):
+        if isinstance(other, (DecimalField, Decimal, int, float)):
+            if isinstance(other, DecimalField):
+                return self.value > other.value
+            return self.value > other
+        return False
+
+    def __ge__(self, other):
+        if isinstance(other, (DecimalField, Decimal, int, float)):
+            if isinstance(other, DecimalField):
+                return self.value >= other.value
+            return self.value >= other
+        return False
+
+    def validate(self, value):
+        super().validate(value)
+        if not self.null and value is None:
+            raise ValueError("DecimalField cannot be null.")
+
+        if value is not None:
+            try:
+                decimal_value = Decimal(str(value))
+            except (InvalidOperation, ValueError, TypeError):
+                raise ValueError(f"Invalid decimal value: {value}")
+
+            if self.max_digits is not None:
+                sign, digits, exponent = decimal_value.as_tuple()
+                total_digits = len(digits)
+                if total_digits > self.max_digits:
+                    raise ValueError(
+                        f"Ensure that there are no more than {self.max_digits} digits in total."
+                    )
+
+            if self.decimal_places is not None:
+                sign, digits, exponent = decimal_value.as_tuple()
+                if exponent < -self.decimal_places:
+                    raise ValueError(
+                        f"Ensure that there are no more than {self.decimal_places} decimal places."
+                    )
+
+    def to_db(self, value=None):
+        if isinstance(value, BaseField):
+            value = value.value
+        if value is None:
+            return None
+        try:
+            decimal_value = Decimal(str(value))
+            self.value = decimal_value
+            # Return string for SQLite compatibility (TEXT storage)
+            # PostgreSQL's NUMERIC type will handle string conversion automatically
+            return str(decimal_value)
+        except (InvalidOperation, ValueError, TypeError):
+            raise ValueError(f"Invalid decimal value: {value}")
+
+    def from_db(self, value):
+        if value is None:
+            return None
+        try:
+            decimal_value = Decimal(str(value))
+            self.value = decimal_value
+            return decimal_value
+        except (InvalidOperation, ValueError, TypeError):
+            return None
+
+    def describe(self):
+        """Returns a string representation of the field with its parameters"""
+        params = []
+        if self.max_digits is not None:
+            params.append(f"max_digits={self.max_digits}")
+        if self.decimal_places is not None:
+            params.append(f"decimal_places={self.decimal_places}")
+        if self.null:
+            params.append("null=True")
+        if self.default is not None:
+            params.append(f"default={repr(self.default)}")
+        if self.primary_key:
+            params.append("primary_key=True")
+        if self.unique:
+            params.append("unique=True")
+        if self.blank:
+            params.append("blank=True")
+
+        return f"DecimalField({', '.join(params)})"
+
+    def get_db_type(self):
+        return "NUMERIC"
 
 
 class JSONField(BaseField):

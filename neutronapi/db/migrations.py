@@ -638,7 +638,7 @@ import json
 from neutronapi.db.migrations import Migration, CreateModel, DeleteModel, AddField, RemoveField, AlterField, RenameField, RenameModel
 from neutronapi.db.fields import (
     BaseField, CharField, TextField, IntegerField, FloatField, BooleanField,
-    DateTimeField, JSONField, VectorField, BinaryField, EnumField
+    DateTimeField, JSONField, VectorField, BinaryField, EnumField, DecimalField
 )
 from neutronapi.db.models import Model # Import Model base class if needed
 # Add specific Enum imports required by this migration
