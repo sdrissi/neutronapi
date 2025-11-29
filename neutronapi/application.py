@@ -178,6 +178,24 @@ class Application:
                 resp = Response(body=err, status_code=404)
                 await resp(scope, receive, send)
 
+            elif scope["type"] == "websocket":
+                path = scope.get("path", "/")
+
+                # Check if path matches any API exactly
+                if path in self._resource_apis:
+                    api = self._resource_apis[path]
+                    await api.handle(scope, receive, send)
+                    return
+
+                # Check if path starts with any API prefix
+                for api_path, api in self._resource_apis.items():
+                    if path.startswith(api_path):
+                        await api.handle(scope, receive, send)
+                        return
+
+                # No matching API for websocket - close connection
+                await send({"type": "websocket.close", "code": 4004})
+
         # Set lifecycle hooks on app function so RoutingMiddleware can find them
         app.on_startup = []
         app.on_shutdown = []
