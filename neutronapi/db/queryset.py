@@ -473,8 +473,6 @@ class QuerySet(Generic[T]):
         if not kwargs:
             return 0
 
-        kwargs['modified'] = datetime.datetime.now(tz=datetime.timezone.utc)
-
         # Ensure provider/dialect is initialized before constructing SQL
         provider = await self._get_provider()
 

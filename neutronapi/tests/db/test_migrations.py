@@ -358,4 +358,279 @@ class TestMigrationManager(IsolatedAsyncioTestCase):
         self.assertTrue(await table_exists(connection, self.provider, self.app_label, f"{self.app_label}_test_model"))
 
 
+class TestMultiDatabaseMigrations(IsolatedAsyncioTestCase):
+    """Test migrations across multiple databases."""
+
+    async def asyncSetUp(self):
+        import uuid
+        unique_id = str(uuid.uuid4())[:8]
+        self.app_label = f"multidb_test_{unique_id}"
+        
+        # Create two temporary SQLite databases
+        self.temp_db_default = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+        self.temp_db_default.close()
+        self.temp_db_secondary = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+        self.temp_db_secondary.close()
+
+        # Setup database configuration with two databases
+        from neutronapi.db.connection import setup_databases
+        db_config = {
+            'default': {
+                'ENGINE': 'aiosqlite',
+                'NAME': self.temp_db_default.name,
+            },
+            'secondary': {
+                'ENGINE': 'aiosqlite',
+                'NAME': self.temp_db_secondary.name,
+            }
+        }
+        self.db_manager = setup_databases(db_config)
+        
+        # Get connections
+        self.conn_default = await self.db_manager.get_connection('default')
+        self.conn_secondary = await self.db_manager.get_connection('secondary')
+
+    async def asyncTearDown(self):
+        await self.db_manager.close_all()
+        try:
+            os.unlink(self.temp_db_default.name)
+        except Exception:
+            pass
+        try:
+            os.unlink(self.temp_db_secondary.name)
+        except Exception:
+            pass
+
+    def _get_table_name(self, model_name):
+        """Convert ModelName to app_label_modelname format."""
+        snake_case = "".join(
+            ["_" + c.lower() if c.isupper() else c.lower() for c in model_name]
+        ).lstrip("_")
+        return f"{self.app_label}_{snake_case}"
+
+    async def test_migrate_same_model_to_multiple_databases(self):
+        """Test that the same migration can be applied to different databases."""
+        model_name = f"{self.app_label}.Item"
+        fields = {
+            "id": CharField(primary_key=True),
+            "name": CharField(max_length=100),
+            "quantity": IntegerField(default=0),
+        }
+        
+        operation = CreateModel(model_name, fields)
+        
+        # Apply to default database
+        await operation.database_forwards(
+            self.app_label, self.conn_default.provider, None, None, self.conn_default
+        )
+        
+        # Apply to secondary database
+        await operation.database_forwards(
+            self.app_label, self.conn_secondary.provider, None, None, self.conn_secondary
+        )
+        
+        # Verify table exists in both databases
+        table_name = self._get_table_name("Item")
+        
+        default_exists = await table_exists(
+            self.conn_default, self.conn_default.provider, self.app_label, table_name
+        )
+        secondary_exists = await table_exists(
+            self.conn_secondary, self.conn_secondary.provider, self.app_label, table_name
+        )
+        
+        self.assertTrue(default_exists)
+        self.assertTrue(secondary_exists)
+
+    async def test_migration_tracker_per_database(self):
+        """Test that each database has its own migration tracking table."""
+        from neutronapi.db.migration_tracker import MigrationTracker
+        
+        tracker = MigrationTracker(base_dir="apps")
+        
+        # Ensure migration table in both databases
+        await tracker.ensure_migration_table(self.conn_default)
+        await tracker.ensure_migration_table(self.conn_secondary)
+        
+        # Verify tracking table exists in default
+        default_result = await self.conn_default.fetch_one(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (tracker.MIGRATION_TABLE,)
+        )
+        self.assertIsNotNone(default_result)
+        
+        # Verify tracking table exists in secondary
+        secondary_result = await self.conn_secondary.fetch_one(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (tracker.MIGRATION_TABLE,)
+        )
+        self.assertIsNotNone(secondary_result)
+
+    async def test_using_with_model_after_migration(self):
+        """Test that Model.objects.using() works after migrating to multiple databases."""
+        from neutronapi.db.models import Model
+        
+        # Create a test model class
+        class TestItem(Model):
+            name = CharField(max_length=100)
+            value = IntegerField(default=0)
+            
+            @classmethod
+            def get_app_label(cls):
+                return self.app_label
+        
+        # Manually set the app_label for the closure
+        app_label = self.app_label
+        TestItem.get_app_label = classmethod(lambda cls: app_label)
+        
+        # Create tables in both databases
+        model_name = f"{self.app_label}.TestItem"
+        operation = CreateModel(model_name, TestItem._neutronapi_fields_)
+        
+        await operation.database_forwards(
+            self.app_label, self.conn_default.provider, None, None, self.conn_default
+        )
+        await operation.database_forwards(
+            self.app_label, self.conn_secondary.provider, None, None, self.conn_secondary
+        )
+        
+        # Create object in default database
+        item_default = TestItem(id="default-1", name="DefaultItem", value=100)
+        await item_default.save(using='default')
+        
+        # Create object in secondary database
+        item_secondary = TestItem(id="secondary-1", name="SecondaryItem", value=200)
+        await item_secondary.save(using='secondary')
+        
+        # Query default database
+        default_count = await TestItem.objects.using('default').count()
+        self.assertEqual(default_count, 1)
+        
+        default_obj = await TestItem.objects.using('default').first()
+        self.assertEqual(default_obj.name, "DefaultItem")
+        self.assertEqual(default_obj.value, 100)
+        
+        # Query secondary database
+        secondary_count = await TestItem.objects.using('secondary').count()
+        self.assertEqual(secondary_count, 1)
+        
+        secondary_obj = await TestItem.objects.using('secondary').first()
+        self.assertEqual(secondary_obj.name, "SecondaryItem")
+        self.assertEqual(secondary_obj.value, 200)
+
+    async def test_delete_using_specific_database(self):
+        """Test that Model.delete(using=) works with specific database."""
+        from neutronapi.db.models import Model
+        
+        app_label = self.app_label
+        
+        class DeleteTestItem(Model):
+            name = CharField(max_length=100)
+            
+            @classmethod
+            def get_app_label(cls):
+                return app_label
+        
+        # Create table in secondary database
+        model_name = f"{self.app_label}.DeleteTestItem"
+        operation = CreateModel(model_name, DeleteTestItem._neutronapi_fields_)
+        await operation.database_forwards(
+            self.app_label, self.conn_secondary.provider, None, None, self.conn_secondary
+        )
+        
+        # Create and save to secondary
+        item = DeleteTestItem(id="del-1", name="ToDelete")
+        await item.save(using='secondary')
+        
+        # Verify it exists
+        count_before = await DeleteTestItem.objects.using('secondary').count()
+        self.assertEqual(count_before, 1)
+        
+        # Delete from secondary
+        await item.delete(using='secondary')
+        
+        # Verify deleted
+        count_after = await DeleteTestItem.objects.using('secondary').count()
+        self.assertEqual(count_after, 0)
+
+    async def test_queryset_create_using(self):
+        """Test that QuerySet.create() respects the using() database alias."""
+        from neutronapi.db.models import Model
+        
+        app_label = self.app_label
+        
+        class CreateTestItem(Model):
+            name = CharField(max_length=100)
+            
+            @classmethod
+            def get_app_label(cls):
+                return app_label
+        
+        # Create tables in both databases
+        model_name = f"{self.app_label}.CreateTestItem"
+        operation = CreateModel(model_name, CreateTestItem._neutronapi_fields_)
+        await operation.database_forwards(
+            self.app_label, self.conn_default.provider, None, None, self.conn_default
+        )
+        await operation.database_forwards(
+            self.app_label, self.conn_secondary.provider, None, None, self.conn_secondary
+        )
+        
+        # Create via QuerySet.using().create()
+        await CreateTestItem.objects.using('secondary').create(
+            id="qs-create-1",
+            name="CreatedViaQuerySet"
+        )
+        
+        # Should NOT exist in default
+        default_count = await CreateTestItem.objects.using('default').count()
+        self.assertEqual(default_count, 0)
+        
+        # Should exist in secondary
+        secondary_count = await CreateTestItem.objects.using('secondary').count()
+        self.assertEqual(secondary_count, 1)
+        
+        obj = await CreateTestItem.objects.using('secondary').first()
+        self.assertEqual(obj.name, "CreatedViaQuerySet")
+
+    async def test_filter_and_update_using(self):
+        """Test filter and update operations with using()."""
+        from neutronapi.db.models import Model
+        
+        app_label = self.app_label
+        
+        class UpdateTestItem(Model):
+            name = CharField(max_length=100)
+            status = CharField(max_length=50, default="pending")
+            
+            @classmethod
+            def get_app_label(cls):
+                return app_label
+        
+        # Create table in secondary
+        model_name = f"{self.app_label}.UpdateTestItem"
+        operation = CreateModel(model_name, UpdateTestItem._neutronapi_fields_)
+        await operation.database_forwards(
+            self.app_label, self.conn_secondary.provider, None, None, self.conn_secondary
+        )
+        
+        # Create items in secondary
+        await UpdateTestItem.objects.using('secondary').create(
+            id="upd-1", name="Item1", status="pending"
+        )
+        await UpdateTestItem.objects.using('secondary').create(
+            id="upd-2", name="Item2", status="pending"
+        )
+        
+        # Update via filter
+        await UpdateTestItem.objects.using('secondary').filter(name="Item1").update(status="completed")
+        
+        # Verify update
+        item1 = await UpdateTestItem.objects.using('secondary').get(id="upd-1")
+        item2 = await UpdateTestItem.objects.using('secondary').get(id="upd-2")
+        
+        self.assertEqual(item1.status, "completed")
+        self.assertEqual(item2.status, "pending")
+
+
 # Legacy test class - keeping for backward compatibility but using new comprehensive tests above
